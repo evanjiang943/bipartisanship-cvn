@@ -1,0 +1,302 @@
+---
+title: "Stat 236 Final Project"
+author: "Evan Jiang, Hannah Park"
+date: "Due Tuesday, December 10, 2024 at 11:59pm"
+fontsize: 11pt
+geometry: margin=1in
+output:
+  pdf_document:
+    latex_engine: pdflatex
+    fig_width: 5
+    fig_height: 3.5
+urlcolor: blue
+header-includes:
+  - \usepackage{tcolorbox}
+  - \usepackage{amsmath}
+  - \usepackage{amsthm}
+  - \usepackage{fvextra}
+  - \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
+---
+
+```{r, echo = FALSE, verbose = FALSE, message = FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.align = "center", fig.width = 9, fig.height = 5 )
+require("tidyverse")
+require("ggplot2")
+library(tidyverse)
+library(ggplot2)
+library(igraph)
+library(ggrepel)
+library(RSpectra)
+```
+
+# Binary DCMM
+
+### Preprocessing and Implementation
+
+```{r}
+# Load the graph from adjacency matrix CSV
+adjacency_matrix <- as.matrix(read.csv("binary_similarity_matrix_2023_2024.csv", row.names = 1, check.names = FALSE))
+graph <- graph_from_adjacency_matrix(adjacency_matrix, mode = "undirected", diag = FALSE)
+
+# Extract the largest connected component
+components <- decompose.graph(graph)
+giantIndx <- which.max(sapply(components, vcount))
+pbGiant <- components[[giantIndx]]
+
+# Extract adjacency matrix of the giant component
+A <- get.adjacency(pbGiant)
+A <- as.matrix(A)
+A <- pmax(A, t(A))
+n <- dim(A)[1]
+degs <- rowSums(A)
+
+# Compute eigenvalues and eigenvectors
+EigsResults <- eigs_sym(A, 2)
+V <- EigsResults$vectors
+if (V[1, 1] < 0) {
+    V[, 1] <- -V[, 1]
+}
+R <- V[, 2] / V[, 1]
+Lambda <- diag(EigsResults$values)
+
+# Perform k-means clustering on R to identify partisan groups
+temp <- kmeans(R, 2)
+centers <- temp$centers
+upperVX <- max(centers)
+lowerVX <- min(centers)
+
+# Normalize values for partisan-bipartisan mapping
+w <- (R - lowerVX) / (upperVX - lowerVX)
+w <- pmax(w, 0)
+w <- pmin(w, 1)
+Q <- matrix(c(1, 1, upperVX, lowerVX), ncol = 2, nrow = 2)
+P0 <- Q %*% Lambda %*% t(Q)
+b1 <- 1 / sqrt(diag(P0))
+P <- diag(b1) %*% P0 %*% diag(b1)
+pi_star <- cbind(w, 1 - w) %*% diag(1 / b1)
+pi <- pi_star[, 1] / rowSums(pi_star)
+pi_normalized <- 2 * pi - 1
+theta <- V[, 1] / (pi_normalized * b1[1] + (1 - pi_normalized) * b1[2])
+```
+
+### Network Plotting
+
+```{r}
+# Assign colors for the nodes (blue for partisan, red for bipartisan)
+label <- temp$cluster - 1
+colors <- vector("character", length = n)
+colors[label == 0] <- "#87CEEB"
+colors[label == 1] <- "#FF4500"
+
+# Plot the network
+layout <- layout_with_fr(pbGiant)  
+plot(pbGiant,
+     layout = layout,
+     vertex.size = 3,
+     vertex.label = NA,
+     vertex.color = colors,
+     edge.color = "gray",
+     edge.arrow.size = 0.5,
+     main = "Voting Similarity Across Parties")
+```
+
+```{r}
+# Summary table
+url <- V(pbGiant)$name  
+summary <- data.frame(R = R, label = label, pi_normalized = pi_normalized, theta = theta, url = url)
+temp <- sort(summary$theta, decreasing = TRUE, index.return = TRUE)
+summary <- summary[temp$ix, ]
+
+head(summary, 10)
+```
+```{r}
+# Add a new column for the true label
+summary$true_label <- ifelse(grepl("\\[R", summary$url), 1, 
+                             ifelse(grepl("\\[D", summary$url), 0, NA))
+
+# Calculate the percentage of matching labels
+correct_matches <- sum(summary$true_label == summary$label, na.rm = TRUE)
+total_valid <- sum(!is.na(summary$true_label))
+
+percentage_correct <- (correct_matches / total_valid) * 100
+cat("Percentage of correctly labeled representatives:", percentage_correct, "%\n")
+```
+
+### Visualizing Bipartisanship
+
+```{r}
+node_labels <- V(pbGiant)$name
+
+plot_data <- data.frame(
+  BipartisanTendency = pi_normalized,
+  Influence = theta,
+  Label = node_labels,
+  Color = colors
+)
+
+# Data adjustment
+plot_data <- plot_data[!plot_data$Influence %in% sort(plot_data$Influence)[1:4], ]
+
+# Highlight top 10 most influential nodes
+highlight_nodes <- order(plot_data$Influence, decreasing = TRUE)[1:20]
+plot_data$Highlight <- ifelse(1:nrow(plot_data) %in% highlight_nodes, plot_data$Label, NA)
+
+# Create the scatter plot with a gradient color scale
+ggplot(plot_data, aes(x = BipartisanTendency, y = Influence, color = BipartisanTendency)) +
+  geom_point(size = 2) +  # Scatter points
+  scale_color_gradient2(high = "#FF4500",  
+                        mid = "black",  
+                        low = "#87CEEB", 
+                        midpoint = 0) +
+  geom_text_repel(aes(label = Highlight), 
+                  size = 3,
+                  max.overlaps = 10, 
+                  box.padding = 0.3, 
+                  point.padding = 0.2, 
+                  segment.color = "grey50") +
+  labs(
+    title = "Bipartisanship in House of Representatives (2023 and 2024)",
+    x = "Partisan Tendency",
+    y = "Influence",
+    color = ""
+  ) +
+  theme_minimal() +
+  theme(
+    plot.background = element_rect(fill = "white", color = "black", size = 1),
+    panel.grid.major = element_line(color = "lightgray", size = 0.1),  
+    panel.grid.minor = element_line(color = "lightgray", size = 0.1),  
+    plot.margin = margin(20, 20, 20, 20)
+)
+```
+
+# Continuous DCMM
+
+### Preprocessing and Implementation
+
+```{r}
+# Load the graph from a continuous similarity matrix CSV
+adjacency_matrix <- as.matrix(read.csv("cont_similarity_matrix_2023_2024.csv", row.names = 1, check.names = FALSE))
+
+# Convert adjacency matrix into an undirected graph with weights
+graph <- graph_from_adjacency_matrix(adjacency_matrix, mode = "undirected", weighted = TRUE, diag = FALSE)
+
+# Extract the largest connected component
+components <- decompose.graph(graph)
+giantIndx <- which.max(sapply(components, vcount))
+pbGiant <- components[[giantIndx]]
+
+# Extract adjacency matrix of the largest connected component
+A <- as_adjacency_matrix(pbGiant, attr = "weight", sparse = FALSE)
+A <- pmax(A, t(A))  
+n <- dim(A)[1]
+degs <- rowSums(A)  # Degree is now sum of weights for each node
+
+# Compute eigenvalues and eigenvectors for the weighted adjacency matrix
+EigsResults <- eigen(A, symmetric = TRUE)
+V <- EigsResults$vectors
+if (V[1, 1] < 0) {
+    V[, 1] <- -V[, 1]
+}
+
+# Calculate the ratio of eigenvectors
+R <- V[, 2] / V[, 1]
+
+# Perform k-means clustering on R to identify partisan groups
+kmeans_results <- kmeans(R, centers = 2)
+centers <- sort(kmeans_results$centers) 
+upperVX <- max(centers)
+lowerVX <- min(centers)
+
+# Normalize values for partisan-bipartisan mapping
+w <- (R - lowerVX) / (upperVX - lowerVX)  # Scale to [0, 1]
+w <- pmax(w, 0)
+w <- pmin(w, 1)
+
+# Use only the first two eigenvalues for Lambda
+Lambda <- diag(EigsResults$values[1:2])  # Extract the top 2 eigenvalues
+Q <- matrix(c(1, 1, upperVX, lowerVX), ncol = 2, nrow = 2)
+
+# Ensure Q and Lambda are compatible
+P0 <- Q %*% Lambda %*% t(Q)
+
+# Normalize P0 to compute partisan-bipartisan scores
+b1 <- 1 / sqrt(diag(P0))
+P <- diag(b1) %*% P0 %*% diag(b1)
+
+# Compute mixed membership proportions (pi_star) and normalize
+pi_star <- cbind(w, 1 - w) %*% diag(1 / b1)
+pi <- pi_star[, 1] / rowSums(pi_star)
+pi_normalized <- 2 * pi - 1  
+
+# Compute theta, reflecting influence weighted by mixed membership
+theta <- V[, 1] / (pi_normalized * b1[1] + (1 - pi_normalized) * b1[2])
+```
+
+```{r}
+# Summary table 
+url <- V(pbGiant)$name
+summary <- data.frame(
+  R = R,  
+  label = kmeans_results$cluster, 
+  pi_normalized = pi_normalized,  
+  theta = theta,
+  url = url  
+)
+summary <- summary[order(summary$theta, decreasing = TRUE), ]
+
+head(summary, 10)
+```
+
+### Visualizing Bipartisanship
+
+```{r}
+# Prepare data for plotting
+node_labels <- V(pbGiant)$name
+
+plot_data <- data.frame(
+  BipartisanTendency = pi_normalized,  
+  Influence = theta,  
+  Label = node_labels,  
+  Color = pi_normalized  
+)
+
+# Data adjustment
+plot_data <- plot_data[!plot_data$Influence %in% sort(plot_data$Influence)[1:4], ]
+
+# Highlight top 20 most influential nodes by their labels
+highlight_nodes <- plot_data$Label[order(plot_data$Influence, decreasing = TRUE)][1:50]
+plot_data$Highlight <- ifelse(plot_data$Label %in% highlight_nodes, plot_data$Label, NA)
+
+
+ggplot(plot_data, aes(x = BipartisanTendency, y = Influence, color = BipartisanTendency)) +
+  geom_point(size = 2) +  
+  scale_color_gradient2(
+    high = "#FF4500",  # Red for strong Republican alignment
+    mid = "black",     # Black for centrist bipartisanship
+    low = "#87CEEB",   # Blue for strong Democratic alignment
+    midpoint = 0       # Midpoint at neutral bipartisanship (0)
+  ) +
+  geom_text_repel(
+    aes(label = Highlight),
+    size = 3,
+    max.overlaps = 10, 
+    box.padding = 0.3, 
+    point.padding = 0.2, 
+    segment.color = "grey50"
+  ) +
+  labs(
+    title = "Bipartisanship in House of Representatives (2023 and 2024)",
+    x = "Bipartisan Tendency",
+    y = "Influence",
+    color = "Bipartisanship"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.background = element_rect(fill = "white", color = "black", size = 1),
+    panel.grid.major = element_line(color = "lightgray", size = 0.1),  
+    panel.grid.minor = element_line(color = "lightgray", size = 0.1),  
+    plot.margin = margin(20, 20, 20, 20)
+  )
+
+ggsave("bipartisanship_plot.png", width = 9, height = 15, dpi = 300)
+```
